@@ -5,6 +5,7 @@ import can
 import time
 from struct import pack, unpack
 from typing import Optional, Tuple, Union
+import threading
 
 class CyberGear:
     # Command constants
@@ -128,6 +129,7 @@ class CyberGear:
         """
         self.__canbus = can.interface.Bus(interface=interface, channel=channel, bitrate=bitrate, extended=True)
         self.debug = debug
+        self.can_lock = threading.Lock()  # Mutex for thread-safe CAN communication
         self.motors = {}  # Dictionary to track initialized motors: {motor_id: Motor}
 
     def init_motor(self, motor_id: int):
@@ -144,30 +146,31 @@ class CyberGear:
         Motor
             An instance of the Motor class.
         """
-        motor = Motor(self.__canbus, motor_id, self.debug)
+        motor = Motor(self.__canbus, motor_id, self.debug, self.can_lock)
         self.motors[motor_id] = motor
         return motor
 
     def receive_motor_data(self) -> bool:
-        try:
-            response = self.__canbus.recv(timeout=CyberGear.CYBERGEAR_RESPONSE_TIME_USEC / 1000000)  # Read the next CAN message
-            if response is None:
+        with self.can_lock:  # Use the lock for thread-safe CAN access
+            try:
+                response = self.__canbus.recv(timeout=CyberGear.CYBERGEAR_RESPONSE_TIME_USEC / 1000000)  # Read the next CAN message
+                if response is None:
+                    return False
+
+                # Extract motor CAN ID
+                motor_can_id = (response.arbitration_id >> 8) & 0xFF
+
+                # Check if the motor ID is in the initialized motors dictionary
+                if motor_can_id not in self.motors:
+                    return False
+
+                # Update motor status
+                return self.motors[motor_can_id].update_motor_status(response.arbitration_id, response.data, len(response.data))
+
+            except Exception as e:
+                if self.debug:
+                    print(f"Error processing CAN packet: {e}")
                 return False
-
-            # Extract motor CAN ID
-            motor_can_id = (response.arbitration_id >> 8) & 0xFF
-
-            # Check if the motor ID is in the initialized motors dictionary
-            if motor_can_id not in self.motors:
-                return False
-
-            # Update motor status
-            return self.motors[motor_can_id].update_motor_status(response.arbitration_id, response.data, len(response.data))
-
-        except Exception as e:
-            if self.debug:
-                print(f"Error processing CAN packet: {e}")
-            return False
 
     def process_packet(self) -> bool:
         """
@@ -196,7 +199,7 @@ class CyberGear:
         self.__canbus.shutdown()
 
 class Motor:
-    def __init__(self, canbus: can.Bus, motor_id: int, debug: bool = False):
+    def __init__(self, canbus: can.Bus, motor_id: int, debug: bool = False, can_lock: threading.Lock = None):
         """
         Initialize a motor instance.
 
@@ -216,21 +219,23 @@ class Motor:
         self.velocity = 0.0
         self.effort = 0.0
         self.temperature = 0.0
+        self.can_lock = can_lock  # Pass the lock to the Motor class
         self.reset_motor()
 
     def __send_command(self, cmd: int, id_opt: int = 0, data: bytes = bytes([0] * 8)) -> bool:
         """Send a CAN message without waiting for a response."""
-        try:
-            msg_id = (cmd & 0x1F) << 24 | (id_opt & 0xFFFF) << 8 | (self.motor_id & 0xFF)
-            msg = can.Message(arbitration_id=msg_id, data=data, is_extended_id=True)
-            if self.debug:
-                print(f'TX: id={msg.arbitration_id:08x} data=', ':'.join(f'{x:02x}' for x in msg.data))
-            self.__canbus.send(msg)
-            return True
-        except Exception as e:
-            if self.debug:
-                print(f"Error sending CAN message for motor {self.motor_id:02X}: {e}")
-            return False
+        with self.can_lock:  # Use the shared lock for CAN operations
+            try:
+                msg_id = (cmd & 0x1F) << 24 | (id_opt & 0xFFFF) << 8 | (self.motor_id & 0xFF)
+                msg = can.Message(arbitration_id=msg_id, data=data, is_extended_id=True)
+                if self.debug:
+                    print(f'TX: id={msg.arbitration_id:08x} data=', ':'.join(f'{x:02x}' for x in msg.data))
+                self.__canbus.send(msg)
+                return True
+            except Exception as e:
+                if self.debug:
+                    print(f"Error sending CAN message for motor {self.motor_id:02X}: {e}")
+                return False
 
     def update_motor_status(self, can_id, data, data_len) -> bool:
         """
