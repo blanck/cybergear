@@ -128,6 +128,7 @@ class CyberGear:
         """
         self.__canbus = can.interface.Bus(interface=interface, channel=channel, bitrate=bitrate, extended=True)
         self.debug = debug
+        self.motors = {}  # Dictionary to track initialized motors: {motor_id: Motor}
 
     def init_motor(self, motor_id: int):
         """
@@ -143,12 +144,56 @@ class CyberGear:
         Motor
             An instance of the Motor class.
         """
-        return Motor(self.__canbus, motor_id, self.debug)
+        motor = Motor(self.__canbus, motor_id, self.debug)
+        self.motors[motor_id] = motor
+        return motor
+
+    def receive_motor_data(self) -> bool:
+        try:
+            response = self.__canbus.recv(timeout=CyberGear.CYBERGEAR_RESPONSE_TIME_USEC / 1000000)  # Read the next CAN message
+            if response is None:
+                return False
+
+            # Extract motor CAN ID
+            motor_can_id = (response.arbitration_id >> 8) & 0xFF
+
+            # Check if the motor ID is in the initialized motors dictionary
+            if motor_can_id not in self.motors:
+                return False
+
+            # Update motor status
+            return self.motors[motor_can_id].update_motor_status(response.arbitration_id, response.data, len(response.data))
+
+        except Exception as e:
+            if self.debug:
+                print(f"Error processing CAN packet: {e}")
+            return False
+
+    def process_packet(self) -> bool:
+        """
+        Process incoming CAN packets and update motor status for all initialized motors.
+        Returns True if any motor status was updated, False otherwise.
+        """
+        is_updated = False
+        while True:  # Check if there are messages available
+            if not self.receive_motor_data():
+                break  # Exit early if no more data
+            is_updated = True
+        return is_updated
+
+    def get_motor_status(self, motor_id):
+        """
+        Retrieve the latest motor status for the specified motor ID.
+        """
+        if motor_id not in self.motors:
+            return None
+
+        motor = self.motors[motor_id]
+        return motor.motor_id, motor.position, motor.velocity, motor.effort, motor.temperature
 
     def close(self):
         """Shutdown the CAN bus."""
         self.__canbus.shutdown()
-
 
 class Motor:
     def __init__(self, canbus: can.Bus, motor_id: int, debug: bool = False):
@@ -167,88 +212,57 @@ class Motor:
         self.__canbus = canbus
         self.motor_id = motor_id
         self.debug = debug
+        self.position = 0.0
+        self.velocity = 0.0
+        self.effort = 0.0
+        self.temperature = 0.0
         self.reset_motor()
-        
-    def __send_receive(self, cmd: int, id_opt: int = 0, data: bytes = bytes([0] * 8)) -> Optional[can.Message]:
-        """Send a CAN message and receive a response."""
-        if self.motor_id <= 0x7f:
-            try:
-                # Construct CAN message ID as per Arduino code
-                msg_id = (cmd & 0x1F) << 24 | (id_opt & 0xFFFF) << 8 | (self.motor_id & 0xFF)
-                msg = can.Message(arbitration_id=msg_id, data=data, is_extended_id=True)
-                if self.debug:
-                    print(f'TX: id={msg.arbitration_id:08x} data=', ':'.join(f'{x:02x}' for x in msg.data))
-                self.__canbus.send(msg)
-                r = self.__canbus.recv(timeout=CyberGear.CYBERGEAR_RESPONSE_TIME_USEC / 1000000)
-                if r is not None:
-                    if self.debug:
-                        print(f'RX: id={r.arbitration_id:08X} data=', ':'.join(f'{x:02x}' for x in r.data))
-                    return r
-            except Exception as e:
-                if self.debug:
-                    print(f"Error: {e}")
-        return None
 
-    def __verify_response_packet(self, response: can.Message) -> bool:
-        """
-        Verify that the response packet is valid.
-
-        Parameters:
-        -----------
-        response : can.Message
-            The CAN message received from the motor.
-
-        Returns:
-        --------
-        bool
-            True if the packet is valid, False otherwise.
-        """
+    def __send_command(self, cmd: int, id_opt: int = 0, data: bytes = bytes([0] * 8)) -> bool:
+        """Send a CAN message without waiting for a response."""
         try:
-            # Extract packet type from the CAN message ID
-            packet_type = (response.arbitration_id >> 24) & 0x3F
+            msg_id = (cmd & 0x1F) << 24 | (id_opt & 0xFFFF) << 8 | (self.motor_id & 0xFF)
+            msg = can.Message(arbitration_id=msg_id, data=data, is_extended_id=True)
+            if self.debug:
+                print(f'TX: id={msg.arbitration_id:08x} data=', ':'.join(f'{x:02x}' for x in msg.data))
+            self.__canbus.send(msg)
+            return True
+        except Exception as e:
+            if self.debug:
+                print(f"Error sending CAN message for motor {self.motor_id:02X}: {e}")
+            return False
 
-            # Check if the packet type is CMD_RESPONSE
-            if packet_type != CyberGear.CMD_RESPONSE:
-                if self.debug:
-                    print(f"Invalid packet type: {packet_type}")
-                return False
+    def update_motor_status(self, can_id, data, data_len) -> bool:
+        """
+        Update motor status based on the received CAN message.
+        Returns True if the status was updated, False otherwise.
+        """
+        if data_len != 8:
+            if self.debug:
+                print(f"Invalid data length: {data_len} bytes")
+            return False
+
+        try:
+            # Extract raw values from the CAN message
+            raw_position = data[0] << 8 | data[1]
+            raw_velocity = data[2] << 8 | data[3]
+            raw_effort = data[4] << 8 | data[5]
+            raw_temperature = data[6] << 8 | data[7]
+
+            # Convert raw values to floats
+            self.position = self.uint_to_float(raw_position, CyberGear.P_MIN, CyberGear.P_MAX)
+            self.velocity = self.uint_to_float(raw_velocity, CyberGear.V_MIN, CyberGear.V_MAX)
+            self.effort = self.uint_to_float(raw_effort, CyberGear.T_MIN, CyberGear.T_MAX)
+            self.temperature = self.uint_to_float(raw_temperature, 0, 6553.5)
+
+            if self.debug:
+                print(f"Motor {self.motor_id:02X}: Position={self.position}, Velocity={self.velocity}, Effort={self.effort}, Temperature={self.temperature}")
 
             return True
         except Exception as e:
             if self.debug:
-                print(f"Error verifying response packet: {e}")
+                print(f"Error updating motor status for motor {self.motor_id:02X}: {e}")
             return False
-
-    def __process_motor_packet(self, data: bytes) -> Tuple[float, float, float, float]:
-        """
-        Process the motor status packet and extract position, velocity, effort, and temperature.
-
-        Parameters:
-        -----------
-        data : bytes
-            The data payload of the CAN message.
-
-        Returns:
-        --------
-        Tuple[float, float, float, float]
-            A tuple containing position, velocity, effort, and temperature.
-        """
-        if len(data) != 8:
-            raise ValueError(f"Unexpected data length: {len(data)} bytes")
-
-        # Unpack raw data from the response
-        raw_position = data[0] << 8 | data[1]  # Combine bytes 0 and 1 for position
-        raw_velocity = data[2] << 8 | data[3]  # Combine bytes 2 and 3 for velocity
-        raw_effort = data[4] << 8 | data[5]    # Combine bytes 4 and 5 for effort
-        raw_temperature = data[6] << 8 | data[7]  # Combine bytes 6 and 7 for temperature
-
-        # Convert raw values to floats
-        position = self.uint_to_float(raw_position, CyberGear.P_MIN, CyberGear.P_MAX)  # Position in radians
-        velocity = self.uint_to_float(raw_velocity, CyberGear.V_MIN, CyberGear.V_MAX)  # Velocity in rad/s
-        effort = self.uint_to_float(raw_effort, CyberGear.T_MIN, CyberGear.T_MAX)  # Effort in Nm
-        temperature = self.uint_to_float(raw_temperature, 0, 6553.5)  # Temperature in degrees Celsius
-
-        return position, velocity, effort, temperature
 
     def uint_to_float(self, x: int, min_val: float, max_val: float) -> float:
         """
@@ -322,8 +336,7 @@ class Motor:
         else:
             raise ValueError(f"Unsupported width: {width}")
 
-        r = self.__send_receive(CyberGear.CMD_RAM_WRITE, data=data_bytes)
-        return r is not None
+        return self.__send_command(CyberGear.CMD_RAM_WRITE, data=data_bytes)
 
     def set_run_mode(self, mode: int) -> bool:
         """Set the run mode for the motor."""
@@ -358,16 +371,16 @@ class Motor:
 
     def enable_motor(self) -> bool:
         """Enable the motor."""
-        return self.__send_receive(CyberGear.CMD_ENABLE, data=bytes([0] * 8)) is not None
+        return self.__send_command(CyberGear.CMD_ENABLE, data=bytes([0] * 8))
 
     def reset_motor(self) -> bool:
         """Reset the motor."""
-        return self.__send_receive(CyberGear.CMD_RESET, data=bytes([0] * 8)) is not None
+        return self.__send_command(CyberGear.CMD_RESET, data=bytes([0] * 8))
 
     def stop_motor(self, fault: bool = False) -> bool:
         """Stop the motor."""
         data = bytes([1 if fault else 0] + [0] * 7)
-        return self.__send_receive(CyberGear.CMD_RESET, data=data) is not None
+        return self.__send_command(CyberGear.CMD_RESET, data=data)
 
     def send_position_command(self, position: float) -> bool:
         """Send a position command to the motor."""
@@ -423,111 +436,23 @@ class Motor:
         ])
 
         # Send the motion command
-        return self.__send_receive(CyberGear.CMD_POSITION, id_opt=torque_int, data=data) is not None
+        return self.__send_command(CyberGear.CMD_POSITION, data=data)
 
     def set_mech_position_to_zero(self) -> bool:
         """Set the mechanical position to zero for the motor."""
-        data = bytes([1] + [0] * 7)
-        return self.__send_receive(CyberGear.CMD_SET_MECH_POSITION_TO_ZERO, data=data) is not None
+        # Ensure the data format matches the motor's expectations
+        data = bytes([0x01] + [0x00] * 7)  # First byte is 0x01, rest are 0x00
+        if self.debug:
+            print(f"Setting mechanical position to zero. Data: {':'.join(f'{x:02x}' for x in data)}")
+        
+        # Send the command and return the result
+        return self.__send_command(CyberGear.CMD_SET_MECH_POSITION_TO_ZERO, data=data)
 
-    def get_motor_status(self, motor_ids: Optional[list[int]] = None, timeout: float = 0.5) -> Union[Optional[Tuple[int, float, float, float, float]], list[Tuple[int, float, float, float, float]]]:
+    def get_motor_status(self):
         """
-        Get the status of the motor(s).
-
-        Parameters:
-        -----------
-        motor_ids : Optional[list[int]]
-            A list of motor IDs to query. If None, returns the status for the current motor.
-        timeout : float, optional
-            The maximum time to wait for responses (default: 0.5 seconds).
-
-        Returns:
-        --------
-        Union[Optional[Tuple[int, float, float, float, float]], list[Tuple[int, float, float, float, float]]]
-            - If `motor_ids` is None: Returns a tuple containing motor ID, position, velocity, effort, and temperature for the current motor.
-            - If `motor_ids` is provided: Returns a list of tuples, each containing motor ID, position, velocity, effort, and temperature.
+        Retrieve the motor status for the current motor
         """
-
-        if motor_ids is None:
-            # Single-motor mode: Return status for the current motor
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                response = self.__canbus.recv(timeout=timeout)
-                if response is None:
-                    if self.debug:
-                        print(f"No response received from motor {self.motor_id:02X}.")
-                    return None
-
-                # Verify the response packet and check if it's for the current motor
-                if not self.__verify_response_packet(response):
-                    continue  # Skip invalid packets
-
-                # Extract motor ID from the CAN message ID
-                motor_can_id = (response.arbitration_id >> 8) & 0xFF
-
-                # Skip if the response is not for the current motor
-                if motor_can_id != self.motor_id:
-                    continue
-
-                # Process the motor status data
-                try:
-                    position, velocity, effort, temperature = self.__process_motor_packet(response.data)
-                    return self.motor_id, position, velocity, effort, temperature
-                except Exception as e:
-                    if self.debug:
-                        print(f"Error processing motor packet for motor {self.motor_id:02X}: {e}")
-                    return None
-
-            if self.debug:
-                print(f"Timeout while waiting for response from motor {self.motor_id:02X}.")
-            return None
-        else:
-            # Multi-motor mode: Return status for all specified motors
-            status_dict = {}  # Dictionary to store motor statuses
-
-            # Send status requests to all motors
-            for motor_id in motor_ids:
-                self.__send_receive(CyberGear.CMD_RESPONSE, id_opt=motor_id)
-
-            # Process all incoming packets
-            start_time = time.time()
-            while time.time() - start_time < timeout:  # Listen for responses for 0.5 seconds
-                response = self.__canbus.recv(timeout=CyberGear.CYBERGEAR_RESPONSE_TIME_USEC / 1000000)  # Wait for a response
-                if response is None:
-                    continue
-
-                # Verify the response packet
-                if not self.__verify_response_packet(response):
-                    continue
-                
-                # Exit if no more data
-                if not response.data:
-                    break
-
-                # Extract motor ID from the CAN message ID
-                motor_can_id = (response.arbitration_id >> 8) & 0xFF
-
-                # Process the motor status data
-                try:
-                    position, velocity, effort, temperature = self.__process_motor_packet(response.data)
-                    status_dict[motor_can_id] = (motor_can_id, position, velocity, effort, temperature)
-                except Exception as e:
-                    if self.debug:
-                        print(f"Error processing motor packet for motor {motor_can_id:02X}: {e}")
-                # Exit early if we've received responses from all requested motors
-                if all(motor_id in status_dict for motor_id in motor_ids):
-                    break
-
-            # Return statuses for all requested motors
-            status_list = []
-            for motor_id in motor_ids:
-                if motor_id in status_dict:
-                    status_list.append(status_dict[motor_id])
-                else:
-                    if self.debug:
-                        print(f"No response received from motor {motor_id:02X}.")
-            return status_list
-
+        return self.position, self.velocity, self.effort, self.temperature
 
 if __name__ == "__main__":
     # Example usage: Switch between speed mode and position mode
@@ -537,13 +462,21 @@ if __name__ == "__main__":
 
     try:
         # Run motor 1 in speed mode for 1 second
-        print("Running motor 1 in speed mode...")
+        print("Running motor 1 in speed mode and print status at 10hz...")
         motor_1.set_run_mode(cg.MODE_SPEED)
-        motor_1.set_speed_limit(4.0)
         motor_1.set_current_control_param(0.075, 0.075, 0.0)
         motor_1.enable_motor()
-        motor_1.send_speed_command(6.0)
-        time.sleep(1)
+
+        # Check for motor status and print for 1 second 
+        start_time = time.time()
+        while time.time() - start_time < 1.0:  # Run for 1 second
+            motor_1.send_speed_command(6.0)
+            # Process incoming CAN packets
+            if cg.process_packet():
+                # Retrieve and print motor status
+                position, velocity, effort, temperature = motor_1.get_motor_status()
+                print(f"Motor {motor_1.motor_id:02X}: Position={position:.2f}, Velocity={velocity:.2f}, Effort={effort:.2f}, Temperature={temperature:.2f}")
+                time.sleep(0.1)
         motor_1.stop_motor()
 
         # Run motor 1 in position mode
@@ -558,9 +491,57 @@ if __name__ == "__main__":
         target_position = 1.57
         motor_1.send_position_command(target_position)
         print(f"Motor 1 moving to position: {target_position} radians")
-        time.sleep(2)
+        time.sleep(2)  # Wait for 2 seconds
+        motor_1.stop_motor()
 
-        # Stop the motors
+        # Run a wheel 50 cm forward in speed mode
+        # Setup depending on wheel size
+        ENCODER_COUNTS_PER_REV = 12.5 / 2  # Encoder counts per revolution
+        WHEEL_DIAMETER = 21.0  # cm
+        WHEEL_CIRCUMFERENCE = math.pi * WHEEL_DIAMETER  # cm
+        CM_PER_COUNT = WHEEL_CIRCUMFERENCE / ENCODER_COUNTS_PER_REV
+        MAX_SPEED = 6.0  # Maximum speed in rad/s
+        MIN_SPEED = 0.1  # Minimum speed in rad/s
+        SLOWDOWN_DISTANCE = 10.0  # Start slowing down in the last 10 cm
+
+        motor_1.set_run_mode(cg.MODE_SPEED)
+        motor_1.set_mech_position_to_zero()  # Reset mechanical position
+        time.sleep(0.1)
+        motor_1.enable_motor()
+
+        target_distance = 50.0  # cm
+        prev_position = 0.0
+        total_distance = 0.0  # Total distance in cm
+        start_time = time.time()
+        print(f"Running Motor 1 forward {target_distance} cm")
+        while total_distance < target_distance:
+            remaining_distance = target_distance - total_distance
+            if remaining_distance <= SLOWDOWN_DISTANCE:
+                speed = max(MIN_SPEED, (remaining_distance / SLOWDOWN_DISTANCE) * MAX_SPEED)
+            else:
+                speed = MAX_SPEED
+            motor_1.send_speed_command(speed)
+
+            if cg.process_packet():
+                # Get the current motor status
+                position, velocity, effort, temperature = motor_1.get_motor_status()
+
+                # Calculate delta and handle wrap-around
+                delta = position - prev_position
+                if abs(position) >= 12.5:  # Handle wrap-around at ±12.5
+                    motor_1.set_mech_position_to_zero()  # Reset mechanical position
+                    position = 0.0
+
+                # Update total distance
+                total_distance += delta * CM_PER_COUNT
+
+                # Update previous position
+                prev_position = position
+
+            # Sleep to control the loop frequency (e.g., 10ms)
+            time.sleep(0.01)
+        # Print status
+        print(f"Total Distance: {total_distance:.2f} cm")
         motor_1.stop_motor()
         #motor_2.stop_motor()
         print("Motors stopped.")
