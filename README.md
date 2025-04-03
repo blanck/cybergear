@@ -42,7 +42,7 @@ The library consists of two main classes:
 #### CyberGear Class
 
 - `__init__(self, interface: str = 'slcan', channel: str = '/dev/ttyUSB_CAN', bitrate: int = 1000000, debug: bool = False)`: Initializes the CAN bus.
-- `init_motor(self, motor_id: int)`: Initializes a motor instance with the specified CAN ID.
+- `init_motor(self, motor_id: int, master_can_id: int)`: Initializes a motor instance with the specified CAN ID.
 - `close(self)`: Shuts down the CAN bus.
 
 #### Motor Class
@@ -63,6 +63,7 @@ The library consists of two main classes:
 - `send_motion_command(self, position: float, speed: float, torque: float, kp: float, kd: float)`: Sends a motion command to the motor (position, speed, torque, Kp, and Kd).
 - `set_mech_position_to_zero(self)`: Sets the mechanical position to zero.
 - `get_motor_status(self, motor_ids: Optional[list[int]] = None, timeout: float = 0.5)`: Retrieves the status of the motor(s) (position, velocity, effort, and temperature).
+- `change_motor_can_id(self, new_can_id: int)`: Change CAN ID of the motor
 
 ## Examples
 

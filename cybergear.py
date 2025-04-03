@@ -132,7 +132,7 @@ class CyberGear:
         self.can_lock = threading.Lock()  # Mutex for thread-safe CAN communication
         self.motors = {}  # Dictionary to track initialized motors: {motor_id: Motor}
 
-    def init_motor(self, motor_id: int):
+    def init_motor(self, motor_id: int, master_can_id: int = 0):
         """
         Initialize a motor instance.
 
@@ -146,7 +146,7 @@ class CyberGear:
         Motor
             An instance of the Motor class.
         """
-        motor = Motor(self.__canbus, motor_id, self.debug, self.can_lock)
+        motor = Motor(self.__canbus, motor_id, master_can_id, self.debug, self.can_lock)
         self.motors[motor_id] = motor
         return motor
 
@@ -199,7 +199,7 @@ class CyberGear:
         self.__canbus.shutdown()
 
 class Motor:
-    def __init__(self, canbus: can.Bus, motor_id: int, debug: bool = False, can_lock: threading.Lock = None):
+    def __init__(self, canbus: can.Bus, motor_id: int, master_can_id: int = 0, debug: bool = False, can_lock: threading.Lock = None):
         """
         Initialize a motor instance.
 
@@ -208,12 +208,15 @@ class Motor:
         canbus : can.Bus
             The shared CAN bus interface.
         motor_id : int
-            The CAN ID of the motor.
+            The CAN ID of the motor - default cybergear CAN id is 0x7F
+        master_can_id : int
+            The MASTER CAN ID - default host id is 0x00
         debug : bool, optional
             Enable debug mode to print CAN messages (default: False).
         """
         self.__canbus = canbus
-        self.motor_id = motor_id
+        self.master_can_id = master_can_id & 0xFF
+        self.motor_id = motor_id & 0xFF
         self.debug = debug
         self.position = 0.0
         self.velocity = 0.0
@@ -341,7 +344,7 @@ class Motor:
         else:
             raise ValueError(f"Unsupported width: {width}")
 
-        return self.__send_command(CyberGear.CMD_RAM_WRITE, data=data_bytes)
+        return self.__send_command(CyberGear.CMD_RAM_WRITE, self.master_can_id, data=data_bytes)
 
     def set_run_mode(self, mode: int) -> bool:
         """Set the run mode for the motor."""
@@ -376,16 +379,16 @@ class Motor:
 
     def enable_motor(self) -> bool:
         """Enable the motor."""
-        return self.__send_command(CyberGear.CMD_ENABLE, data=bytes([0] * 8))
+        return self.__send_command(CyberGear.CMD_ENABLE, self.master_can_id, data=bytes([0] * 8))
 
     def reset_motor(self) -> bool:
         """Reset the motor."""
-        return self.__send_command(CyberGear.CMD_RESET, data=bytes([0] * 8))
+        return self.__send_command(CyberGear.CMD_RESET, self.master_can_id, data=bytes([0] * 8))
 
     def stop_motor(self, fault: bool = False) -> bool:
         """Stop the motor."""
         data = bytes([1 if fault else 0] + [0] * 7)
-        return self.__send_command(CyberGear.CMD_RESET, data=data)
+        return self.__send_command(CyberGear.CMD_RESET, self.master_can_id, data=data)
 
     def send_position_command(self, position: float) -> bool:
         """Send a position command to the motor."""
@@ -441,7 +444,7 @@ class Motor:
         ])
 
         # Send the motion command
-        return self.__send_command(CyberGear.CMD_POSITION, data=data)
+        return self.__send_command(CyberGear.CMD_POSITION, self.master_can_id, data=data)
 
     def set_mech_position_to_zero(self) -> bool:
         """Set the mechanical position to zero for the motor."""
@@ -451,13 +454,21 @@ class Motor:
             print(f"Setting mechanical position to zero. Data: {':'.join(f'{x:02x}' for x in data)}")
         
         # Send the command and return the result
-        return self.__send_command(CyberGear.CMD_SET_MECH_POSITION_TO_ZERO, data=data)
+        return self.__send_command(CyberGear.CMD_SET_MECH_POSITION_TO_ZERO, self.master_can_id, data=data)
 
     def get_motor_status(self):
         """
         Retrieve the motor status for the current motor
         """
         return self.position, self.velocity, self.effort, self.temperature
+    
+    def change_motor_can_id(self, new_can_id: int):
+        """Sends the command to the motor to change its CAN ID."""
+        # Calculate the value for the id_opt parameter (bits 23-8 of Arbitration ID)
+        id_option = ((new_can_id & 0xFF) << 8) | (self.master_can_id & 0xFF)
+        # Prepare the required data payload (Byte 0 = 1)
+        data = bytes([0x01] + [0x00] * 7)
+        return self.__send_command(cmd=CyberGear.CMD_CHANGE_CAN_ID, id_opt=id_option, data=data)
 
 if __name__ == "__main__":
     # Example usage: Switch between speed mode and position mode
