@@ -4,11 +4,12 @@ import math
 import can
 import time
 from struct import pack, unpack
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 import threading
 
 class CyberGear:
     # Command constants
+    CMD_GET_MCU_ID = 0
     CMD_POSITION = 1
     CMD_RESPONSE = 2
     CMD_ENABLE = 3
@@ -106,7 +107,7 @@ class CyberGear:
     CW = 1
     CCW = -1
 
-    def __init__(self, interface: str = 'slcan', channel: str = '/dev/ttyUSB_CAN', bitrate: int = 1000000, debug: bool = False):
+    def __init__(self, interface: str = 'slcan', channel: str = '/dev/ttyUSB_CAN', bitrate: int = 1000000, master_can_id: int = 0, debug: bool = False):
         """
         Initialize the CyberGear motor controller.
 
@@ -129,6 +130,7 @@ class CyberGear:
         """
         self.__canbus = can.interface.Bus(interface=interface, channel=channel, bitrate=bitrate, extended=True)
         self.debug = debug
+        self.master_can_id = master_can_id & 0xFF # Store the master ID
         self.can_lock = threading.Lock()  # Mutex for thread-safe CAN communication
         self.motors = {}  # Dictionary to track initialized motors: {motor_id: Motor}
 
@@ -193,6 +195,72 @@ class CyberGear:
 
         motor = self.motors[motor_id]
         return motor.motor_id, motor.position, motor.velocity, motor.effort, motor.temperature
+    
+    def ping_motor(self, motor_id: int, timeout: float = 0.01) -> bool:
+        """Sends a GET_MCU_ID command (Type 0) and waits for a matching response."""
+        target_id = motor_id & 0xFF
+        cmd_type = CyberGear.CMD_GET_MCU_ID
+        id_opt = self.master_can_id
+        data = bytes(8)
+        try:
+            arbitration_id = (cmd_type & 0x1F) << 24 | (id_opt & 0xFFFF) << 8 | target_id
+            ping_msg = can.Message(arbitration_id=arbitration_id, data=data, is_extended_id=True)
+        except Exception as e:
+            if self.debug: print(f"Error constructing ping message for ID {target_id}: {e}")
+            return False
+        with self.can_lock:
+            try:
+                if self.debug: print(f'TX PING to {target_id:02X}: id={ping_msg.arbitration_id:08x}')
+                self.__canbus.send(ping_msg)
+            except Exception as e:
+                if self.debug: print(f"Error sending ping to ID {target_id}: {e}")
+                return False
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            with self.can_lock:
+                response = self.__canbus.recv(timeout=0.01)
+            if response is not None:
+                if self.debug: print(f"RX during ping wait: id={response.arbitration_id:08x} data={response.data.hex(':')} ext={response.is_extended_id}")
+                if response.is_extended_id:
+                    response_cmd_type = (response.arbitration_id >> 24) & 0x1F
+                    responding_motor_id_in_opt = (response.arbitration_id >> 8) & 0xFF
+                    if response_cmd_type == CyberGear.CMD_GET_MCU_ID and responding_motor_id_in_opt == target_id:
+                        if self.debug: print(f"Ping SUCCESS for ID {target_id}")
+                        return True
+        return False
+
+    def scan_for_motors(self, scan_range: range = range(1, 128), timeout: float = 0.05) -> List[int]:
+        """
+        Scans a range of CAN IDs by pinging each one, shows dot progress.
+        Prints detected IDs as hex strings, returns them as integers.
+
+        Args:
+            scan_range: Range of IDs to scan (e.g., range(1, 128)).
+            timeout: Timeout (seconds) for each individual ping.
+
+        Returns:
+            A sorted list of detected motor CAN IDs as integers (e.g., [1, 124]).
+        """
+        detected_ids_int = []
+        print(f"Scanning IDs {scan_range.start} to {scan_range.stop - 1}: ", end='', flush=True)
+
+        for motor_id_to_scan in scan_range:
+            if self.ping_motor(motor_id_to_scan, timeout=timeout):
+                detected_ids_int.append(motor_id_to_scan)
+        print(" Done.")
+
+        sorted_detected_ids_int = sorted(detected_ids_int)
+
+        detected_ids_hex = [f"0x{motor_id:02x}" for motor_id in sorted_detected_ids_int]
+
+        if self.debug:
+             print(f"Scan complete. Detected (hex): {detected_ids_hex}")
+        elif not detected_ids_hex:
+             print("No motors detected.")
+        else:
+            print(f"Detected: {detected_ids_hex}")
+
+        return sorted_detected_ids_int
 
     def close(self):
         """Shutdown the CAN bus."""
@@ -473,9 +541,13 @@ class Motor:
 if __name__ == "__main__":
     # Example usage: Switch between speed mode and position mode
     cg = CyberGear(interface='slcan', channel='/dev/ttyUSB_CAN', debug=False)
-    motor_1 = cg.init_motor(0x7F)
-    #motor_2 = cg.init_motor(0x7D)
-
+    motors = cg.scan_for_motors()
+    if motors:
+        motor_1 = cg.init_motor(motors[0]) # use first detected motor
+        #motor_2 = cg.init_motor(0x7D)
+    else:
+        cg.close()
+        exit()
     try:
         # Run motor 1 in speed mode for 1 second
         print("Running motor 1 in speed mode and print status at 10hz...")

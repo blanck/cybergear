@@ -41,9 +41,11 @@ The library consists of two main classes:
 
 #### CyberGear Class
 
-- `__init__(self, interface: str = 'slcan', channel: str = '/dev/ttyUSB_CAN', bitrate: int = 1000000, debug: bool = False)`: Initializes the CAN bus.
+- `__init__(self, interface: str = 'slcan', channel: str = '/dev/ttyUSB_CAN', bitrate: int = 1000000, master_can_id: int, debug: bool = False)`: Initializes the CAN bus.
 - `init_motor(self, motor_id: int, master_can_id: int)`: Initializes a motor instance with the specified CAN ID.
 - `close(self)`: Shuts down the CAN bus.
+- `ping_motor(self, motor_id: int, timeout: float)`: Ping a specific motor id.
+- `scan_for_motors(self, scan_range: range, timeout: float)`: Scan controller for motors and return list with detected motor ids.
 
 #### Motor Class
 
