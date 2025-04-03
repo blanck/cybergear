@@ -540,7 +540,7 @@ class Motor:
 
 if __name__ == "__main__":
     # Example usage: Switch between speed mode and position mode
-    cg = CyberGear(interface='slcan', channel='/dev/ttyUSB_CAN', debug=False)
+    cg = CyberGear(interface='slcan', channel='/dev/tty.usbmodem206933BB55311', debug=False)
     motors = cg.scan_for_motors()
     if motors:
         motor_1 = cg.init_motor(motors[0]) # use first detected motor

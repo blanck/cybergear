@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pycybergear"
+version = "1.0.0"
+authors = [
+  { name="blanck" },
+]
+description = "A Python library for controlling Xiaomi CyberGear motors via CAN bus using python-can."
+readme = "README.md"
+requires-python = ">=3.8" # Recommend 3.8+ due to can.Notifier and newer typing
+license = { file="LICENSE" }
+keywords = ["cybergear", "motor", "control", "can", "robotics", "xiaomi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+
+# --- Runtime Dependencies ---
+dependencies = [
+    "python-can >= 4.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/blanck/cybergear" # *** UPDATE URL ***
+"Bug Tracker" = "https://github.com/blanck/cybergear/issues" # *** UPDATE URL ***
+"Repository" = "https://github.com/blanck/cybergear.git" # *** UPDATE URL ***
