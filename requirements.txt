@@ -1,2 +1,0 @@
-python-can>=4.0.0  # For CAN bus communication
-typing-extensions>=4.0.0  # For typing support (Optional, Tuple, Union)
